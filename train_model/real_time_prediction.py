@@ -1,3 +1,15 @@
+"""
+BehaviorTrace — Realtime LSL Inference (EmotiBit)
+Written by Paul Gedrimas — 12/2025
+
+This script:
+- Discovers EmotiBit LSL streams via pylsl
+- Buffers incoming samples in rolling time windows
+- Reconstructs the exact feature schema used during training
+- Runs a saved scikit-learn model for realtime state/activity prediction
+- Prints predictions and optional buffer health diagnostics
+"""
+
 from pylsl import resolve_streams, StreamInlet, local_clock
 import pandas as pd
 import numpy as np
@@ -8,11 +20,19 @@ from collections import deque
 # -------------------------
 # CONFIG
 # -------------------------
+
+# Feature window length (seconds) used for inference (must match training window)
 WINDOW_SECONDS = 10.0
+
+# How often to produce a prediction (seconds); uses sliding stride
 STRIDE_SECONDS = 5.0
+
+# Main loop sleep to reduce CPU usage
 SLEEP_SECONDS = 0.01
 
-# Map LSL stream name -> training signal name
+# Map LSL stream names -> training signal names
+# LSL names must match what EmotiBit publishes over LSL
+# Training signal names must match what the model was trained on
 LSL_TO_SIGNAL = {
     "ACC_X": "ax",
     "ACC_Y": "ay",
@@ -34,7 +54,8 @@ LSL_TO_SIGNAL = {
     "TEMP1": "temp",
 }
 
-# Must match the training script's SIGNAL_SPECS (dense vs sparse + min_samples)
+# Dense signals require a minimum number of samples per window
+# These thresholds must match the training script's SIGNAL_SPECS min_samples
 DENSE_SPECS = {
     "ax": 50, "ay": 50, "az": 50,
     "gyro_x": 50, "gyro_y": 50, "gyro_z": 50,
@@ -43,79 +64,119 @@ DENSE_SPECS = {
     "eda": 20,
     "temp": 10,
 }
+
+# Sparse signals are irregular and use event-style features (count/last/age/mean/std)
 SPARSE_SIGNALS = {"heart_rate", "skin_con_amp", "skin_con_freq", "skin_con_rise"}
 
-PRINT_BUFFER_HEALTH_EVERY = 1  # strides; set 0 to disable
-PRINT_SKIP_REASONS = True
+# Diagnostic printing controls
+PRINT_BUFFER_HEALTH_EVERY = 1  # Print buffer status every N strides; set 0 to disable
+PRINT_SKIP_REASONS = True      # Print reasons when inference is skipped
 
 # -------------------------
-# LOAD MODEL
+# LOAD MODEL ARTIFACTS
 # -------------------------
+
+# Load trained classifier and label encoder from disk
 clf = joblib.load("models/emotibit_activity_model.joblib")
 le = joblib.load("models/label_encoder.joblib")
 
+# Use the feature order the model expects (ensures schema matches training)
 FEATURE_ORDER = list(getattr(clf, "feature_names_in_", []))
 if not FEATURE_ORDER:
-    raise RuntimeError("Model missing feature_names_in_. Retrain with sklearn>=1.0 or save feature list manually.")
+    raise RuntimeError(
+        "Model missing feature_names_in_. Retrain with sklearn>=1.0 or save feature list manually."
+    )
 
 # -------------------------
-# BUFFERS
+# BUFFERS (rolling window storage)
 # -------------------------
-# buffers store (lsl_ts, value)
+# Each LSL stream buffer stores tuples: (lsl_timestamp_seconds, value)
 buffers = {lsl: deque() for lsl in LSL_TO_SIGNAL.keys()}
+
+# Track last time we predicted (in LSL clock)
 last_pred_t = 0.0
 stride_count = 0
 
 # -------------------------
-# LSL SETUP
+# LSL DISCOVERY + INLET SETUP
 # -------------------------
+
+# Discover all available streams
 streams = resolve_streams()
 inlets = []
 
+# Create StreamInlet objects for streams that match the mapping
 for s in streams:
     if s.name() in LSL_TO_SIGNAL:
+        # max_buflen controls internal pylsl buffer (seconds)
         inlet = StreamInlet(s, max_buflen=60)
         inlets.append((s.name(), inlet))
         print(f"Connected to {s.name()} -> {LSL_TO_SIGNAL[s.name()]}")
 
+# Fail fast if no streams match
 if not inlets:
     raise RuntimeError("No matching LSL streams found. Check stream names vs LSL_TO_SIGNAL keys.")
 
 print("\n--- Realtime inference started ---\n")
 
 # -------------------------
-# HELPERS
+# HELPER FUNCTIONS
 # -------------------------
+
 def prune_old(now_lsl: float):
+    """
+    Remove samples older than the rolling window cutoff from all buffers.
+    """
     cutoff = now_lsl - WINDOW_SECONDS
     for dq in buffers.values():
         while dq and dq[0][0] < cutoff:
             dq.popleft()
 
 def buffer_health(now_lsl: float) -> str:
+    """
+    Produce a human-readable status string showing buffer sizes and coverage.
+    Useful for debugging missing/slow streams.
+    """
     lines = [f"[STATUS] now_lsl={now_lsl:.3f} window={WINDOW_SECONDS:.1f}s"]
     for lsl_name, train_name in LSL_TO_SIGNAL.items():
         dq = buffers.get(lsl_name, deque())
         n = len(dq)
+
         if n == 0:
             lines.append(f"  {lsl_name:8s}->{train_name:14s} n=0")
             continue
+
         ts0, ts1 = dq[0][0], dq[-1][0]
         span = ts1 - ts0
-        lines.append(f"  {lsl_name:8s}->{train_name:14s} n={n:4d} span={span:6.2f}s last_age={(now_lsl-ts1):5.2f}s")
+        last_age = now_lsl - ts1
+        lines.append(
+            f"  {lsl_name:8s}->{train_name:14s} n={n:4d} span={span:6.2f}s last_age={last_age:5.2f}s"
+        )
+
     return "\n".join(lines)
 
 def dense_features_from_buffer(sig: str, dq: deque):
-    # dq: (ts, val) pairs already pruned to window
+    """
+    Compute dense-signal features from a rolling window buffer.
+
+    Returns:
+      (feature_dict, None) on success
+      (None, reason_string) on failure (e.g., insufficient samples)
+    """
     n = len(dq)
     min_samples = DENSE_SPECS[sig]
+
+    # Require enough samples to make statistics meaningful
     if n < min_samples:
         return None, f"{sig} dense n={n} < min_samples={min_samples}"
 
     ts = np.array([t for (t, _) in dq], dtype=float)
     v = np.array([val for (_, val) in dq], dtype=float)
 
+    # Window time span based on first/last samples
     span = float(ts[-1] - ts[0])
+
+    # Estimate sampling interval and effective sampling frequency
     dt = np.diff(ts)
     if len(dt) == 0:
         return None, f"{sig} dense dt empty"
@@ -137,13 +198,16 @@ def dense_features_from_buffer(sig: str, dq: deque):
     return feats, None
 
 def sparse_features_from_buffer(sig: str, dq: deque, now_lsl: float):
-    # Implements the same sparse schema as training:
-    # count, last, time_since_last, mean, std
-    n = len(dq)
-    feats = {
-        f"{sig}_count": float(n),
-    }
+    """
+    Compute sparse-signal features from a rolling window buffer.
 
+    Mirrors the training schema:
+      - count, last, time_since_last, mean, std
+    """
+    n = len(dq)
+    feats = {f"{sig}_count": float(n)}
+
+    # No events in this window
     if n == 0:
         feats.update({
             f"{sig}_last": np.nan,
@@ -153,10 +217,12 @@ def sparse_features_from_buffer(sig: str, dq: deque, now_lsl: float):
         })
         return feats
 
+    # At least one event exists
     last_ts, last_val = dq[-1]
     feats[f"{sig}_last"] = float(last_val)
     feats[f"{sig}_time_since_last"] = float(now_lsl - float(last_ts))
 
+    # If multiple events, compute mean/std; otherwise default mean=last, std=0
     if n >= 2:
         v = np.array([val for (_, val) in dq], dtype=float)
         feats[f"{sig}_mean"] = float(np.mean(v))
@@ -168,11 +234,17 @@ def sparse_features_from_buffer(sig: str, dq: deque, now_lsl: float):
     return feats
 
 def extract_features(now_lsl: float):
+    """
+    Build the full feature vector (as a dict) for the current window.
+
+    Returns:
+      (feats_dict, []) if successful
+      (None, [reasons...]) if any dense signal is missing data or schema mismatch occurs
+    """
     feats = {}
     reasons = []
 
-    # Build by TRAINING signal name, not LSL name
-    # First ensure all required signals are present in mapping
+    # Iterate through streams and compute features by TRAINING signal name
     for lsl_name, sig in LSL_TO_SIGNAL.items():
         dq = buffers.get(lsl_name, deque())
 
@@ -185,27 +257,36 @@ def extract_features(now_lsl: float):
         elif sig in SPARSE_SIGNALS:
             feats.update(sparse_features_from_buffer(sig, dq, now_lsl))
         else:
-            # If you trained on a signal but forgot to categorize it, this will show up immediately
+            # Helps detect config drift between training and realtime code
             reasons.append(f"{sig} not categorized (dense/sparse)")
 
+    # If any dense stream is insufficient, skip prediction (training required dense completeness)
     if reasons:
         return None, reasons
 
-    # Enforce schema exactly
+    # Enforce exact feature schema expected by the model
     missing_cols = [c for c in FEATURE_ORDER if c not in feats]
     extra_cols = [c for c in feats.keys() if c not in set(FEATURE_ORDER)]
+
     if missing_cols:
-        return None, [f"schema missing: {missing_cols[:12]}{'...' if len(missing_cols)>12 else ''}"]
+        return None, [f"schema missing: {missing_cols[:12]}{'...' if len(missing_cols) > 12 else ''}"]
     if extra_cols:
-        return None, [f"schema extra: {extra_cols[:12]}{'...' if len(extra_cols)>12 else ''}"]
+        return None, [f"schema extra: {extra_cols[:12]}{'...' if len(extra_cols) > 12 else ''}"]
 
     return feats, []
 
 def predict_from_feats(feats: dict):
+    """
+    Run the classifier on a single feature dict and return (label, confidence).
+    """
+    # Build a 1-row dataframe in the exact expected column order
     X = pd.DataFrame([[feats[c] for c in FEATURE_ORDER]], columns=FEATURE_ORDER)
+
+    # Predict integer class then decode to original label
     pred_class = int(clf.predict(X)[0])
     label = le.inverse_transform([pred_class])[0]
 
+    # Optional confidence via predict_proba
     conf = None
     if hasattr(clf, "predict_proba"):
         proba = clf.predict_proba(X)[0]
@@ -214,44 +295,56 @@ def predict_from_feats(feats: dict):
     return label, conf
 
 # -------------------------
-# MAIN LOOP
+# MAIN LOOP (realtime stream + inference)
 # -------------------------
 while True:
+    # LSL clock used to align timestamps consistently across streams
     now_lsl = local_clock()
 
-    # Pull chunks (better than pull_sample for high-rate streams)
+    # Pull chunks from each inlet (better throughput than pull_sample for high-rate signals)
     for stream_name, inlet in inlets:
         chunk, ts_list = inlet.pull_chunk(timeout=0.0, max_samples=512)
         if ts_list:
             for samp, ts in zip(chunk, ts_list):
+                # EmotiBit streams typically carry a single float per sample: samp[0]
                 buffers[stream_name].append((float(ts), float(samp[0])))
 
+    # Keep buffers bounded to the last WINDOW_SECONDS
     prune_old(now_lsl)
 
+    # Predict once per STRIDE_SECONDS
     if now_lsl - last_pred_t >= STRIDE_SECONDS:
         last_pred_t = now_lsl
         stride_count += 1
 
+        # Optional buffer diagnostics (helps detect missing streams)
         if PRINT_BUFFER_HEALTH_EVERY and (stride_count % PRINT_BUFFER_HEALTH_EVERY == 0):
             print(buffer_health(now_lsl))
 
+        # Build the feature vector for this window
         feats, reasons = extract_features(now_lsl)
         if feats is None:
             if PRINT_SKIP_REASONS:
-                print("[SKIP] cannot predict:", "; ".join(reasons[:6]) + (" ..." if len(reasons) > 6 else ""))
+                msg = "; ".join(reasons[:6]) + (" ..." if len(reasons) > 6 else "")
+                print("[SKIP] cannot predict:", msg)
             time.sleep(SLEEP_SECONDS)
             continue
 
+        # Predict and print output
         try:
             label, conf = predict_from_feats(feats)
             ts_str = time.strftime("%H:%M:%S")
+
             if conf is None:
                 print(f"[{ts_str}] -> {label}")
             else:
                 print(f"[{ts_str}] -> {label} (conf={conf:.2f})")
+
         except Exception as e:
+            # Debug schema/value issues without crashing the stream loop
             print("[ERROR] prediction failed:", repr(e))
             print("[DEBUG] first 12 feature keys:", FEATURE_ORDER[:12])
             print("[DEBUG] example values:", [feats[k] for k in FEATURE_ORDER[:5]])
 
+    # Small sleep to avoid tight-loop CPU burn
     time.sleep(SLEEP_SECONDS)

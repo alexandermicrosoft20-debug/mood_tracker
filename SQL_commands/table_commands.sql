@@ -1,3 +1,21 @@
+/*
+BehaviorTrace — Supabase Database Schema
+Written by Paul Gedrimas — 12/2025
+
+This schema defines the complete backend data model for BehaviorTrace, including:
+- User roles and profiles
+- Study forms and labeling definitions (event / decay / EMA)
+- User interaction logs and EMA state tracking
+- Device assignment and biosignal storage (EmotiBit)
+- Indexed, time-series–friendly tables for high-frequency wearable data
+
+Design goals:
+- Strong referential integrity via foreign keys
+- Cascading deletes where appropriate
+- Separation of dense biosignals into per-signal tables
+- Compatibility with Supabase Auth and RLS
+*/
+
 create table public.profiles (
   id uuid not null,
   role text not null,

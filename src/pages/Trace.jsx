@@ -1,4 +1,15 @@
-// src/pages/Trace.jsx
+/**
+ * BehaviorTrace — Trace Page (User Interaction + EMA Handling)
+ * Written by Paul Gedrimas — 12/2025
+ *
+ * This component:
+ * - Authenticates the current user via Supabase
+ * - Fetches available forms and their labels
+ * - Allows users to log event, decay, and EMA-based states
+ * - Manages EMA timers and confirmation prompts
+ * - Writes user interactions to Supabase tables
+ */
+
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../supabase";
 import { useNavigate } from "react-router-dom";
@@ -6,35 +17,48 @@ import { useNavigate } from "react-router-dom";
 export default function Trace() {
   const navigate = useNavigate();
 
+  // -------------------------
+  // STATE
+  // -------------------------
+
+  // Authenticated user ID
   const [userId, setUserId] = useState(null);
+
+  // Forms with attached labels
   const [forms, setForms] = useState([]);
+
+  // Temporary UI feedback after logging actions
   const [successMessage, setSuccessMessage] = useState("");
 
-  // EMA state
+  // EMA prompt modal state
   const [emaPrompt, setEmaPrompt] = useState(null);
+
+  // Ref to store EMA timeout ID (prevents duplicate timers)
   const emaTimerRef = useRef(null);
 
+  // -------------------------
+  // INITIAL LOAD
+  // -------------------------
   useEffect(() => {
     const init = async () => {
+      // Get active session
       const {
         data: { session },
         error: sessErr,
       } = await supabase.auth.getSession();
 
-      if (sessErr) {
-        console.error("[Trace] session error:", sessErr);
-        navigate("/");
-        return;
-      }
-
-      if (!session) {
+      // Session error or unauthenticated → redirect to login
+      if (sessErr || !session) {
+        if (sessErr) console.error("[Trace] session error:", sessErr);
         navigate("/");
         return;
       }
 
       setUserId(session.user.id);
 
-      // 1) Fetch forms
+      // -------------------------
+      // FETCH FORMS
+      // -------------------------
       const { data: formsData, error: formsErr } = await supabase
         .from("forms")
         .select("id,title,description,created_at")
@@ -49,7 +73,9 @@ export default function Trace() {
       const safeForms = formsData || [];
       const formIds = safeForms.map((f) => f.id);
 
-      // 2) Fetch labels (explicitly include ema_prompt)
+      // -------------------------
+      // FETCH LABELS (INCLUDING EMA FIELDS)
+      // -------------------------
       let labelsData = [];
       if (formIds.length > 0) {
         const { data, error: labelsErr } = await supabase
@@ -61,13 +87,12 @@ export default function Trace() {
 
         if (labelsErr) {
           console.error("[Trace] labels fetch error:", labelsErr);
-          labelsData = [];
         } else {
           labelsData = data || [];
         }
       }
 
-      // HARD DEBUG: verify ema_prompt is arriving from DB
+      // Debug visibility into EMA prompt configuration
       console.log("[Trace] formsData:", safeForms);
       console.log("[Trace] labelsData (first 10):", labelsData.slice(0, 10));
       console.log(
@@ -82,7 +107,9 @@ export default function Trace() {
           }))
       );
 
-      // 3) Build forms with labels
+      // -------------------------
+      // MERGE FORMS + LABELS
+      // -------------------------
       const merged = safeForms.map((f) => ({
         ...f,
         labels: labelsData.filter((l) => l.form_id === f.id),
@@ -93,11 +120,15 @@ export default function Trace() {
 
     init();
 
+    // Cleanup any pending EMA timers on unmount
     return () => {
       clearTimeout(emaTimerRef.current);
     };
   }, [navigate]);
 
+  // -------------------------
+  // EMA TIMER HANDLING
+  // -------------------------
   function scheduleEmaPrompt(state, label) {
     clearTimeout(emaTimerRef.current);
 
@@ -108,16 +139,18 @@ export default function Trace() {
     }
 
     emaTimerRef.current = setTimeout(() => {
-      // HARD DEBUG: confirm label includes ema_prompt at time of showing modal
       console.log("[Trace] showing EMA prompt for label:", label);
       setEmaPrompt({ state, label });
     }, seconds * 1000);
   }
 
+  // -------------------------
+  // LABEL LOGGING
+  // -------------------------
   async function logLabel(formId, label) {
     if (!userId) return;
 
-    // EVENT / DECAY
+    // EVENT / DECAY LABELS
     if (label.label_type !== "ema") {
       const { error } = await supabase.from("user_logs").insert({
         user_id: userId,
@@ -136,7 +169,7 @@ export default function Trace() {
       return;
     }
 
-    // EMA
+    // EMA LABELS
     const { data: existing, error: exErr } = await supabase
       .from("user_states")
       .select("*")
@@ -151,6 +184,7 @@ export default function Trace() {
       return;
     }
 
+    // Start new EMA state if none active
     if (!existing) {
       const { data: newState, error: insErr } = await supabase
         .from("user_states")
@@ -172,17 +206,21 @@ export default function Trace() {
       scheduleEmaPrompt(newState, label);
       setTimeout(() => setSuccessMessage(""), 2000);
     } else {
-      // already active: optionally re-schedule prompt
+      // Already active → reschedule prompt
       scheduleEmaPrompt(existing, label);
       setSuccessMessage(`"${label.label_name}" already active`);
       setTimeout(() => setSuccessMessage(""), 2000);
     }
   }
 
+  // -------------------------
+  // EMA RESPONSE HANDLING
+  // -------------------------
   async function handleEmaResponse(answer) {
     const { state, label } = emaPrompt;
 
     if (answer === "yes") {
+      // User confirms state still active
       const { error } = await supabase
         .from("user_states")
         .update({ last_confirmed_at: new Date() })
@@ -196,6 +234,7 @@ export default function Trace() {
 
       scheduleEmaPrompt(state, label);
     } else {
+      // User ends state
       const { error } = await supabase
         .from("user_states")
         .update({
@@ -214,6 +253,9 @@ export default function Trace() {
     setEmaPrompt(null);
   }
 
+  // -------------------------
+  // AUTH / UI HELPERS
+  // -------------------------
   async function logout() {
     await supabase.auth.signOut();
     navigate("/");
@@ -225,13 +267,16 @@ export default function Trace() {
     return "btn-outline-primary";
   }
 
-  // Use DB prompt if available
+  // Prefer database-defined EMA prompt; fallback to generic text
   function emaPromptText(label) {
     const p = (label?.ema_prompt ?? "").trim();
     if (p) return p;
     return `Do you still feel ${label?.label_name || "this state"}?`;
   }
 
+  // -------------------------
+  // RENDER
+  // -------------------------
   return (
     <div className="container mt-5">
       <div className="d-flex justify-content-between mb-4">
@@ -241,7 +286,9 @@ export default function Trace() {
         </button>
       </div>
 
-      {successMessage && <div className="alert alert-success">{successMessage}</div>}
+      {successMessage && (
+        <div className="alert alert-success">{successMessage}</div>
+      )}
 
       {forms.map((f) => (
         <div key={f.id} className="mb-4">
@@ -265,14 +312,23 @@ export default function Trace() {
       {/* EMA PROMPT MODAL */}
       {emaPrompt && (
         <div className="position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50 d-flex align-items-center justify-content-center">
-          <div className="bg-white p-4 rounded" style={{ maxWidth: 520, width: "92%" }}>
+          <div
+            className="bg-white p-4 rounded"
+            style={{ maxWidth: 520, width: "92%" }}
+          >
             <h5>{emaPromptText(emaPrompt.label)}</h5>
 
             <div className="mt-3 d-flex gap-2">
-              <button className="btn btn-success" onClick={() => handleEmaResponse("yes")}>
+              <button
+                className="btn btn-success"
+                onClick={() => handleEmaResponse("yes")}
+              >
                 Yes
               </button>
-              <button className="btn btn-danger" onClick={() => handleEmaResponse("no")}>
+              <button
+                className="btn btn-danger"
+                onClick={() => handleEmaResponse("no")}
+              >
                 No
               </button>
             </div>

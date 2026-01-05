@@ -1,11 +1,25 @@
+# Netlify configuration for BehaviorTrace
+# Written by Paul Gedrimas — 12/2025
+
 [build]
+  # Command Netlify runs to build the frontend (Vite → dist/)
   command = "npm run build"
+
+  # Directory to publish as the deployed site
   publish = "dist"
+
+  # Directory containing Netlify serverless functions
   functions = "netlify/functions"
 
 [functions]
+  # Use esbuild to bundle serverless functions
+  # This provides fast builds and modern JS/TS support
   node_bundler = "esbuild"
 
 [[scheduled]]
+  # Scheduled (cron) serverless function used by BehaviorTrace
+  # This function handles EMA-related background tasks
   function = "ema-scheduler"
+
+  # Cron schedule: runs every 5 minutes
   schedule = "*/5 * * * *"

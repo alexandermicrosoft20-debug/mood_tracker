@@ -1,9 +1,23 @@
-// src/App.jsx
+/**
+ * BehaviorTrace — Application Routing
+ * Written by Paul Gedrimas — 12/2025
+ *
+ * This file:
+ * - Defines all client-side routes using React Router
+ * - Separates normal user and admin authentication flows
+ * - Protects routes with role-specific guards
+ * - Redirects unknown routes back to the login page
+ */
+
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+
+// Public and protected pages
 import Auth from "./pages/Auth";
 import Trace from "./pages/Trace";
 import AdminAuth from "./pages/AdminAuth";
 import Dashboard from "./pages/DashBoard";
+
+// Route guards
 import ProtectedRoute from "./components/ProtectedRoute";
 import AdminProtectedRoute from "./components/AdminProtectedRoute";
 
@@ -11,8 +25,14 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Normal users */}
+        {/* ----------------- */}
+        {/* Normal user routes */}
+        {/* ----------------- */}
+
+        {/* User login / signup */}
         <Route path="/" element={<Auth />} />
+
+        {/* Main tracing interface (authenticated users only) */}
         <Route
           path="/trace"
           element={
@@ -22,8 +42,14 @@ export default function App() {
           }
         />
 
-        {/* Admin */}
+        {/* ----------------- */}
+        {/* Admin routes */}
+        {/* ----------------- */}
+
+        {/* Admin login */}
         <Route path="/admin" element={<AdminAuth />} />
+
+        {/* Admin dashboard (admin-authenticated only) */}
         <Route
           path="/dashboard"
           element={
@@ -33,6 +59,7 @@ export default function App() {
           }
         />
 
+        {/* Catch-all: redirect unknown routes to login */}
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </BrowserRouter>

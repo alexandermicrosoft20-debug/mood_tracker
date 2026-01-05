@@ -1,3 +1,16 @@
+"""
+BehaviorTrace — EmotiBit Windowed Feature Extraction & Activity Classification
+Written by Paul Gedrimas — 12/2025
+
+This script:
+- Loads labeled time intervals and raw EmotiBit sensor CSVs
+- Windows biosignal data using a sliding window
+- Extracts dense and sparse signal features
+- Trains a Random Forest classifier
+- Evaluates performance
+- Saves the trained model and label encoder
+"""
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -8,81 +21,105 @@ from sklearn.metrics import classification_report
 import joblib
 
 # -------------------------
-# CONFIG
+# CONFIGURATION
 # -------------------------
+
+# Directory containing training CSV files
 DATA_DIR = Path("training_data")
+
+# Sliding window parameters
 WINDOW_SECONDS = 10
 STRIDE_SECONDS = 5
+
+# Label used when a window does not fall inside a labeled interval
 UNKNOWN_LABEL = "unknown"
 
+# Convert window parameters to pandas timedeltas
 WINDOW = pd.Timedelta(seconds=WINDOW_SECONDS)
 STRIDE = pd.Timedelta(seconds=STRIDE_SECONDS)
 
-# Define each signal with a strategy
-# - dense: expects frequent samples; require a minimum count
-# - sparse: irregular/bursty; allow 0/1 samples and extract different features
+# -------------------------
+# SIGNAL DEFINITIONS
+# -------------------------
+# Each signal is defined as either:
+# - dense: sampled frequently (requires a minimum sample count)
+# - sparse: irregular events (e.g., heart rate updates)
+
 SIGNAL_SPECS = {
-    # dense ~25 Hz
+    # Accelerometer (≈25 Hz)
     "ax": {"type": "dense", "min_samples": 50},
     "ay": {"type": "dense", "min_samples": 50},
     "az": {"type": "dense", "min_samples": 50},
 
+    # Gyroscope
     "gyro_x": {"type": "dense", "min_samples": 50},
     "gyro_y": {"type": "dense", "min_samples": 50},
     "gyro_z": {"type": "dense", "min_samples": 50},
 
+    # Magnetometer
     "magno_x": {"type": "dense", "min_samples": 50},
     "magno_y": {"type": "dense", "min_samples": 50},
     "magno_z": {"type": "dense", "min_samples": 50},
 
+    # PPG channels
     "ppg_red": {"type": "dense", "min_samples": 50},
     "ppg_infrared": {"type": "dense", "min_samples": 50},
     "ppg_green": {"type": "dense", "min_samples": 50},
 
-    # medium rate (often ~15 Hz)
+    # Electrodermal activity (~15 Hz)
     "eda": {"type": "dense", "min_samples": 20},
 
-    # lower rate (often ~7.5 Hz)
+    # Skin temperature (~7.5 Hz)
     "temp": {"type": "dense", "min_samples": 10},
 
-    # sparse / irregular
+    # Sparse physiological events
     "heart_rate": {"type": "sparse"},
     "skin_con_amp": {"type": "sparse"},
     "skin_con_freq": {"type": "sparse"},
     "skin_con_rise": {"type": "sparse"},
-
-    # If you later add these, set type appropriately:
-    # "edl": {"type": "dense", "min_samples": 20},
-    # "inter_beat": {"type": "sparse"},
 }
 
+# Convenience list of signal names
 SIGNALS = list(SIGNAL_SPECS.keys())
 
 # -------------------------
 # LOAD LABEL INTERVALS
 # -------------------------
+# CSV must contain:
+# - started_at
+# - ended_at
+# - label_name
 labels = pd.read_csv(
     DATA_DIR / "label_intervals.csv",
     parse_dates=["started_at", "ended_at"]
 ).sort_values("started_at").reset_index(drop=True)
 
 # -------------------------
-# LOAD SENSOR CSVs
+# LOAD SENSOR CSV FILES
 # -------------------------
 def load_sensor(name: str) -> pd.DataFrame:
+    """
+    Load a single sensor CSV and standardize columns.
+    """
     df = pd.read_csv(DATA_DIR / f"emotibit_{name}.csv", parse_dates=["recorded_at"])
     df = df.sort_values("recorded_at")
     df = df[["recorded_at", "value"]].rename(columns={"value": name})
     return df
 
+# Load all sensor data into a dictionary
 sensors = {s: load_sensor(s) for s in SIGNALS}
 
 # -------------------------
 # FEATURE EXTRACTION
 # -------------------------
-def dense_features(df: pd.DataFrame, col: str, t0: pd.Timestamp, t1: pd.Timestamp, min_samples: int):
+def dense_features(df, col, t0, t1, min_samples):
+    """
+    Extract statistical and timing features from dense signals.
+    """
     w = df[(df["recorded_at"] >= t0) & (df["recorded_at"] < t1)]
     n = len(w)
+
+    # Skip window if too few samples
     if n < min_samples:
         return None
 
@@ -90,9 +127,8 @@ def dense_features(df: pd.DataFrame, col: str, t0: pd.Timestamp, t1: pd.Timestam
     ts = w["recorded_at"].to_numpy(dtype="datetime64[ns]").astype("int64") / 1e9
     dt = np.diff(ts)
 
-    # dt can be empty if n==1 (but min_samples prevents that)
     mean_dt = float(np.mean(dt)) if len(dt) else np.nan
-    eff_hz = float(1.0 / mean_dt) if (len(dt) and mean_dt > 0) else np.nan
+    eff_hz = float(1.0 / mean_dt) if mean_dt and mean_dt > 0 else np.nan
     span = float(ts[-1] - ts[0]) if n >= 2 else 0.0
 
     return {
@@ -104,27 +140,29 @@ def dense_features(df: pd.DataFrame, col: str, t0: pd.Timestamp, t1: pd.Timestam
         f"{col}_samples": float(n),
         f"{col}_mean_dt": mean_dt,
         f"{col}_effective_hz": eff_hz,
-        f"{col}_coverage": float(span / WINDOW_SECONDS) if WINDOW_SECONDS > 0 else np.nan,
+        f"{col}_coverage": float(span / WINDOW_SECONDS),
     }
 
-def sparse_features(df: pd.DataFrame, col: str, t0: pd.Timestamp, t1: pd.Timestamp):
+def sparse_features(df, col, t0, t1):
+    """
+    Extract event-based features from sparse signals.
+    """
     w = df[(df["recorded_at"] >= t0) & (df["recorded_at"] < t1)]
     n = len(w)
 
-    feats = {
-        f"{col}_count": float(n),
-    }
+    feats = {f"{col}_count": float(n)}
 
+    # No events in window
     if n == 0:
         feats.update({
             f"{col}_last": np.nan,
-            f"{col}_time_since_last": float(WINDOW_SECONDS),  # "no sample in window"
+            f"{col}_time_since_last": float(WINDOW_SECONDS),
             f"{col}_mean": np.nan,
             f"{col}_std": np.nan,
         })
         return feats
 
-    # at least 1 sample
+    # At least one event
     last_time = w["recorded_at"].iloc[-1]
     feats[f"{col}_last"] = float(w[col].iloc[-1])
     feats[f"{col}_time_since_last"] = float((t1 - last_time).total_seconds())
@@ -139,25 +177,29 @@ def sparse_features(df: pd.DataFrame, col: str, t0: pd.Timestamp, t1: pd.Timesta
 
     return feats
 
-def extract_window_features(t0: pd.Timestamp, t1: pd.Timestamp):
+def extract_window_features(t0, t1):
+    """
+    Extract features for all signals in a single window.
+    """
     feats = {}
     for sig, spec in SIGNAL_SPECS.items():
         df = sensors[sig]
         if spec["type"] == "dense":
-            f = dense_features(df, sig, t0, t1, min_samples=spec["min_samples"])
+            f = dense_features(df, sig, t0, t1, spec["min_samples"])
             if f is None:
-                return None  # skip this window (dense signal missing too much data)
+                return None  # drop window if any dense signal is missing
             feats.update(f)
         else:
             feats.update(sparse_features(df, sig, t0, t1))
     return feats
 
 # -------------------------
-# LABEL ASSIGNMENT (efficient-ish)
+# LABEL ASSIGNMENT
 # -------------------------
-def label_for_window(t0: pd.Timestamp, t1: pd.Timestamp) -> str:
-    # strict containment like your original: window must be fully inside interval
-    # if you want overlap-based labeling later, change this function.
+def label_for_window(t0, t1):
+    """
+    Assign a label if the window is fully contained within a label interval.
+    """
     for _, row in labels.iterrows():
         if t0 >= row.started_at and t1 <= row.ended_at:
             return row.label_name
@@ -173,20 +215,19 @@ end = max(df["recorded_at"].max() for df in sensors.values())
 
 X, y = [], []
 t = start
-
 skipped = 0
+
 while t + WINDOW <= end:
     t_end = t + WINDOW
-
     feats = extract_window_features(t, t_end)
+
     if feats is None:
         skipped += 1
         t += STRIDE
         continue
 
-    y.append(label_for_window(t, t_end))
     X.append(feats)
-
+    y.append(label_for_window(t, t_end))
     t += STRIDE
 
 X = pd.DataFrame(X)
@@ -196,13 +237,8 @@ print("Windows kept:", len(y), "Skipped:", skipped)
 print("Label distribution:")
 print(pd.Series(y).value_counts())
 
-# Drop unknown if you want a purely supervised activity classifier
-# (optional; if you keep UNKNOWN, it becomes another class)
-# mask = (y != UNKNOWN_LABEL)
-# X, y = X[mask], y[mask]
-
 # -------------------------
-# ENCODE + SPLIT
+# ENCODE LABELS & SPLIT DATA
 # -------------------------
 le = LabelEncoder()
 y_enc = le.fit_transform(y)
@@ -215,7 +251,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 # -------------------------
-# TRAIN
+# TRAIN MODEL
 # -------------------------
 clf = RandomForestClassifier(
     n_estimators=500,
@@ -226,15 +262,16 @@ clf = RandomForestClassifier(
 clf.fit(X_train, y_train)
 
 # -------------------------
-# EVAL
+# EVALUATION
 # -------------------------
 y_pred = clf.predict(X_test)
 print(classification_report(y_test, y_pred, target_names=le.classes_))
 
 # -------------------------
-# SAVE
+# SAVE MODEL ARTIFACTS
 # -------------------------
 Path("models").mkdir(exist_ok=True)
 joblib.dump(clf, "models/emotibit_activity_model.joblib")
 joblib.dump(le, "models/label_encoder.joblib")
+
 print("Model saved.")

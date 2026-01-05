@@ -1,3 +1,24 @@
+"""
+BehaviorTrace — EmotiBit SD Card CSV Ingestion to Supabase
+Written by Paul Gedrimas — 12/2025
+
+This script:
+- Walks through a directory of EmotiBit SD exports (one folder per recording/user session)
+- Extracts device_id from the *_info.json file inside each folder
+- Loads each EmotiBit sensor CSV (AX, AY, AZ, EDA, etc.)
+- Converts EmotiBit LocalTimestamp (epoch seconds) into timezone-aware timestamps
+  using America/Los_Angeles (PST/PDT)
+- Batches inserts into Supabase time-series tables for efficient ingestion
+
+Assumptions:
+- BASE_DIR contains subfolders, each with one *_info.json and multiple *_XX.csv files
+- CSVs contain a LocalTimestamp column and a sensor-specific data column (e.g., AX, AY, EA)
+- Supabase tables exist and follow schema: (device_id, recorded_at, value)
+
+Security:
+- Uses SUPABASE_SERVICE_ROLE_KEY (bypasses RLS). Keep .env private.
+"""
+
 import os
 import json
 import pandas as pd
@@ -7,36 +28,72 @@ from supabase import create_client
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+# -------------------------
+# ENV / SUPABASE SETUP
+# -------------------------
 
-# Load env vars
+# Load environment variables from .env
 load_dotenv()
 
+# Supabase credentials (server-side ingestion)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
+# Create Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-BASE_DIR = "emotibit_SD_data"
-BATCH_SIZE = 1000  # safe + fast for Supabase
+# -------------------------
+# INGESTION CONFIG
+# -------------------------
 
+# Root directory containing all SD export folders
+BASE_DIR = "emotibit_SD_data"
+
+# Batch size for Supabase inserts (balance speed vs request size)
+BATCH_SIZE = 1000
+
+# Interpret EmotiBit LocalTimestamp as Pacific time (PST/PDT)
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
+# -------------------------
+# HELPERS
+# -------------------------
 
 def extract_device_id(info_json_path):
+    """
+    Read EmotiBit *_info.json and extract the device_id.
+
+    EmotiBit info schema (expected):
+      data[0]["info"]["device_id"]
+    """
     with open(info_json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # EmotiBit schema: first list item → info → device_id
     return data[0]["info"]["device_id"]
 
+
 def ingest_csv(csv_path, device_id, data_col, supabase_table):
+    """
+    Load one EmotiBit sensor CSV and insert into the matching Supabase table.
+
+    Args:
+      csv_path: path to the EmotiBit CSV file
+      device_id: extracted device id used as foreign key
+      data_col: sensor value column name in CSV (e.g., "AX", "EA", "T1")
+      supabase_table: destination table name in Supabase (e.g., "emotibit_ax")
+
+    Notes:
+      - Converts LocalTimestamp (epoch seconds) into timezone-aware datetime
+      - Inserts in batches for performance
+    """
     df = pd.read_csv(csv_path)
 
-    # Interpret LocalTimestamp as PST/PDT (NOT UTC)
+    # Convert epoch seconds to timezone-aware datetime in Pacific time
     df["recorded_at"] = df["LocalTimestamp"].apply(
         lambda ts: datetime.fromtimestamp(ts, tz=PACIFIC_TZ)
     )
 
+    # Build insert payloads
     records = [
         {
             "device_id": device_id,
@@ -46,34 +103,31 @@ def ingest_csv(csv_path, device_id, data_col, supabase_table):
         for _, row in df.iterrows()
     ]
 
+    # Insert in batches to avoid payload size/timeouts
     for i in range(0, len(records), BATCH_SIZE):
         batch = records[i : i + BATCH_SIZE]
         supabase.table(supabase_table).insert(batch).execute()
 
 
 def process_user_folder(folder_path):
+    """
+    Process a single SD export folder:
+    - locate *_info.json and each *_XX.csv sensor file
+    - extract device_id
+    - ingest each available CSV into its destination table
+    """
+    # File pointers initialized as None (one folder may not include every stream)
     info_json = None
-    ax_csv = None
-    ay_csv = None
-    az_csv = None
-    eda_csv = None
-    edl_csv = None
-    gyro_x_csv = None
-    gyro_y_csv = None
-    gyro_z_csv = None
-    hr_csv = None
-    bi_csv = None
-    mx_csv = None
-    my_csv = None
-    mz_csv = None
-    pg_csv = None
-    pi_csv = None
-    pr_csv = None
-    sa_csv = None
-    sf_csv = None
-    sr_csv = None
+    ax_csv = ay_csv = az_csv = None
+    eda_csv = edl_csv = None
+    gyro_x_csv = gyro_y_csv = gyro_z_csv = None
+    hr_csv = bi_csv = None
+    mx_csv = my_csv = mz_csv = None
+    pg_csv = pi_csv = pr_csv = None
+    sa_csv = sf_csv = sr_csv = None
     t1_csv = None
 
+    # Identify files by suffix
     for file in os.listdir(folder_path):
         if file.endswith("_info.json"):
             info_json = os.path.join(folder_path, file)
@@ -118,7 +172,10 @@ def process_user_folder(folder_path):
         elif file.endswith("_T1.csv"):
             t1_csv = os.path.join(folder_path, file)
 
+    # Extract device_id from the info JSON
     device_id = extract_device_id(info_json)
+
+    # Ingest each sensor stream into its corresponding table
     ingest_csv(ax_csv, device_id, "AX", "emotibit_ax")
     ingest_csv(ay_csv, device_id, "AY", "emotibit_ay")
     ingest_csv(az_csv, device_id, "AZ", "emotibit_az")
@@ -142,10 +199,15 @@ def process_user_folder(folder_path):
 
 
 def main():
+    """
+    Iterate through all subfolders in BASE_DIR and ingest each one.
+    """
     for entry in os.listdir(BASE_DIR):
         folder_path = os.path.join(BASE_DIR, entry)
         if os.path.isdir(folder_path):
             process_user_folder(folder_path)
 
+
+# Script entry point
 if __name__ == "__main__":
     main()
