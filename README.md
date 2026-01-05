@@ -18,6 +18,12 @@ The system is built using **EmotiBit**, an open-source wearable that monitors an
 
 ---
 
+## 📺 Repository Overview Video
+
+[![BehaviorTrace — Repository Overview](docs/images/video_thumbnail.png)](https://youtu.be/p5ERwq-JWYU)
+
+---
+
 ## Getting Started
 
 Full setup and study documentation is available here:
