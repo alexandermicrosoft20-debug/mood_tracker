@@ -3,7 +3,7 @@
  * Written by Paul Gedrimas - 12/2025
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "../supabase";
 import { useNavigate } from "react-router-dom";
 import traceLogo from "../../assets/images/logo.png";
@@ -16,6 +16,53 @@ const ACTIVE_COLOR_STYLES = {
   primary: { backgroundColor: "#0d6efd", borderColor: "#0d6efd", color: "#fff" },
   dark: { backgroundColor: "#212529", borderColor: "#212529", color: "#fff" },
 };
+
+const PENDING_ACTIONS_KEY = "trace.pendingActions";
+const CACHED_ACTIVE_STATES_KEY = "trace.cachedActiveStates";
+const CACHED_FORMS_KEY = "trace.cachedForms";
+const CONNECTION_PROBE_INTERVAL_MS = 1000;
+const CONNECTION_PROBE_TIMEOUT_MS = 1000;
+
+function readJsonStorage(key, fallback) {
+  if (typeof window === "undefined") return fallback;
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (error) {
+    console.error(`[Trace] failed to read localStorage key "${key}":`, error);
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.error(`[Trace] failed to write localStorage key "${key}":`, error);
+  }
+}
+
+function createClientStateId() {
+  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isNetworkFailure(error) {
+  if (!error) return false;
+
+  const message = String(error.message || error.details || error.description || "").toLowerCase();
+  return (
+    error.name === "TypeError" ||
+    error.name === "AbortError" ||
+    message.includes("failed to fetch") ||
+    message.includes("networkerror") ||
+    message.includes("network request failed") ||
+    message.includes("load failed") ||
+    message.includes("fetch")
+  );
+}
 
 function toActiveStateMap(states) {
   return Object.fromEntries(states.map((state) => [state.label_id, state]));
@@ -43,9 +90,31 @@ export default function Trace() {
   const [forms, setForms] = useState([]);
   const [activeStates, setActiveStates] = useState({});
   const [successMessage, setSuccessMessage] = useState("");
+  const [connectionStatus, setConnectionStatus] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine
+  );
+  const [pendingActions, setPendingActions] = useState(() =>
+    readJsonStorage(PENDING_ACTIONS_KEY, [])
+  );
+
+  const pendingActionsRef = useRef([]);
+  const userIdRef = useRef(null);
+  const syncInFlightRef = useRef(false);
+  const connectionProbeRef = useRef(null);
 
   useEffect(() => {
     const init = async () => {
+      const cachedForms = readJsonStorage(CACHED_FORMS_KEY, []);
+      const cachedActiveStates = readJsonStorage(CACHED_ACTIVE_STATES_KEY, {});
+
+      if (cachedForms.length > 0) {
+        setForms(cachedForms);
+      }
+
+      if (Object.keys(cachedActiveStates).length > 0) {
+        setActiveStates(cachedActiveStates);
+      }
+
       const {
         data: { session },
         error: sessErr,
@@ -58,6 +127,7 @@ export default function Trace() {
       }
 
       setUserId(session.user.id);
+      userIdRef.current = session.user.id;
 
       const { data: formsData, error: formsErr } = await supabase
         .from("forms")
@@ -66,7 +136,9 @@ export default function Trace() {
 
       if (formsErr) {
         console.error("[Trace] forms fetch error:", formsErr);
-        setForms([]);
+        if (isNetworkFailure(formsErr)) {
+          setConnectionStatus(false);
+        }
         return;
       }
 
@@ -84,6 +156,9 @@ export default function Trace() {
 
         if (labelsErr) {
           console.error("[Trace] labels fetch error:", labelsErr);
+          if (isNetworkFailure(labelsErr)) {
+            setConnectionStatus(false);
+          }
         } else {
           labelsData = data || [];
         }
@@ -97,6 +172,9 @@ export default function Trace() {
 
       if (activeStatesErr) {
         console.error("[Trace] active states fetch error:", activeStatesErr);
+        if (isNetworkFailure(activeStatesErr)) {
+          setConnectionStatus(false);
+        }
       } else {
         setActiveStates(toActiveStateMap(activeStatesData || []));
       }
@@ -107,20 +185,257 @@ export default function Trace() {
       }));
 
       setForms(merged);
+      writeJsonStorage(CACHED_FORMS_KEY, merged);
     };
 
     init();
   }, [navigate]);
+
+  useEffect(() => {
+    writeJsonStorage(CACHED_ACTIVE_STATES_KEY, activeStates);
+  }, [activeStates]);
+
+  useEffect(() => {
+    pendingActionsRef.current = pendingActions;
+    writeJsonStorage(PENDING_ACTIONS_KEY, pendingActions);
+  }, [pendingActions]);
+
+  useEffect(() => {
+    async function probeConnection() {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        setConnectionStatus(false);
+        return false;
+      }
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), CONNECTION_PROBE_TIMEOUT_MS);
+
+      try {
+        await fetch(`${import.meta.env.VITE_SUPABASE_URL}/rest/v1/`, {
+          method: "HEAD",
+          headers: {
+            apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+          },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        window.clearTimeout(timeoutId);
+        setConnectionStatus(true);
+        return true;
+      } catch (error) {
+        window.clearTimeout(timeoutId);
+        if (isNetworkFailure(error)) {
+          setConnectionStatus(false);
+          return false;
+        }
+
+        return connectionStatus;
+      }
+    }
+
+    const handleOnline = () => {
+      probeConnection();
+    };
+
+    const handleOffline = () => {
+      setConnectionStatus(false);
+    };
+
+    probeConnection();
+    connectionProbeRef.current = window.setInterval(probeConnection, CONNECTION_PROBE_INTERVAL_MS);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      if (connectionProbeRef.current) {
+        window.clearInterval(connectionProbeRef.current);
+      }
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [connectionStatus]);
+
+  useEffect(() => {
+    if (connectionStatus && userId) {
+      flushPendingActions();
+    }
+  }, [connectionStatus, userId]);
 
   function flashSuccess(message) {
     setSuccessMessage(message);
     setTimeout(() => setSuccessMessage(""), 2500);
   }
 
+  function queuePendingAction(action) {
+    setPendingActions((current) => [...current, action]);
+  }
+
+  function saveLogOffline(payload, labelName) {
+    setConnectionStatus(false);
+    queuePendingAction({
+      type: "log",
+      user_id: payload.user_id,
+      payload,
+    });
+    flashSuccess(`Saved "${labelName}" offline. It will sync when internet returns.`);
+  }
+
+  function startStateOffline({ formId, label, startedAt }) {
+    const clientStateId = createClientStateId();
+    const offlineState = {
+      id: clientStateId,
+      clientStateId,
+      label_id: label.id,
+      form_id: formId,
+      started_at: startedAt,
+      pendingSync: true,
+    };
+
+    setConnectionStatus(false);
+    setActiveStates((current) => ({
+      ...current,
+      [label.id]: offlineState,
+    }));
+
+    queuePendingAction({
+      type: "start_state",
+      user_id: userId,
+      clientStateId,
+      payload: {
+        user_id: userId,
+        form_id: formId,
+        label_id: label.id,
+        started_at: startedAt,
+      },
+    });
+
+    flashSuccess(`Started "${label.label_name}" offline. It will sync when internet returns.`);
+  }
+
+  function stopStateOffline({ label, existing, endedAt }) {
+    setConnectionStatus(false);
+    setActiveStates((current) => {
+      const next = { ...current };
+      delete next[label.id];
+      return next;
+    });
+
+    queuePendingAction({
+      type: "stop_state",
+      user_id: userId,
+      stateId: String(existing.id).startsWith("local-") ? null : existing.id,
+      clientStateId: existing.clientStateId || existing.id,
+      endedAt,
+    });
+
+    flashSuccess(
+      `Stopped "${label.label_name}" offline after ${formatDuration(existing.started_at, endedAt)}.`
+    );
+  }
+
+  async function flushPendingActions() {
+    if (syncInFlightRef.current) return;
+
+    const queued = pendingActionsRef.current;
+    const currentUserId = userIdRef.current;
+
+    if (!connectionStatus || !currentUserId || queued.length === 0) return;
+
+    syncInFlightRef.current = true;
+    const clientStateIdMap = new Map();
+    const remaining = [];
+    let actionIndex = 0;
+
+    try {
+      for (actionIndex = 0; actionIndex < queued.length; actionIndex += 1) {
+        const action = queued[actionIndex];
+
+        if (action.user_id !== currentUserId) {
+          remaining.push(action);
+          continue;
+        }
+
+        if (action.type === "log") {
+          const { error } = await supabase.from("user_logs").insert(action.payload);
+          if (error) throw error;
+          continue;
+        }
+
+        if (action.type === "start_state") {
+          const { data, error } = await supabase
+            .from("user_states")
+            .insert(action.payload)
+            .select("id,label_id,form_id,started_at")
+            .single();
+
+          if (error) throw error;
+
+          clientStateIdMap.set(action.clientStateId, data.id);
+
+          setActiveStates((current) => {
+            const existing = current[action.payload.label_id];
+
+            if (!existing || existing.clientStateId === action.clientStateId) {
+              return {
+                ...current,
+                [action.payload.label_id]: data,
+              };
+            }
+
+            return current;
+          });
+          continue;
+        }
+
+        if (action.type === "stop_state") {
+          const stateId = action.stateId || clientStateIdMap.get(action.clientStateId);
+
+          if (!stateId) {
+            remaining.push(action);
+            continue;
+          }
+
+          const { error } = await supabase
+            .from("user_states")
+            .update({
+              active: false,
+              ended_at: action.endedAt,
+            })
+            .eq("id", stateId);
+
+          if (error) throw error;
+          continue;
+        }
+      }
+
+      setPendingActions(remaining);
+
+      if (queued.length > 0 && remaining.length === 0) {
+        flashSuccess("Cached activity synced to the internet.");
+      }
+    } catch (error) {
+      console.error("[Trace] pending sync error:", error);
+      setPendingActions([...remaining, ...queued.slice(actionIndex)]);
+    } finally {
+      syncInFlightRef.current = false;
+    }
+  }
+
   async function logLabel(formId, label) {
     if (!userId) return;
 
     if (label.label_type !== "ema") {
+      const payload = {
+        user_id: userId,
+        form_id: formId,
+        label_id: label.id,
+      };
+
+      if (!connectionStatus) {
+        saveLogOffline(payload, label.label_name);
+        return;
+      }
+
       const { error } = await supabase.from("user_logs").insert({
         user_id: userId,
         form_id: formId,
@@ -129,6 +444,10 @@ export default function Trace() {
 
       if (error) {
         console.error("[Trace] user_logs insert error:", error);
+        if (isNetworkFailure(error)) {
+          saveLogOffline(payload, label.label_name);
+          return;
+        }
         alert(error.message);
         return;
       }
@@ -140,6 +459,13 @@ export default function Trace() {
     const existing = activeStates[label.id];
 
     if (!existing) {
+      const startedAt = new Date().toISOString();
+
+      if (!connectionStatus) {
+        startStateOffline({ formId, label, startedAt });
+        return;
+      }
+
       const { data: newState, error: insErr } = await supabase
         .from("user_states")
         .insert({
@@ -152,6 +478,10 @@ export default function Trace() {
 
       if (insErr) {
         console.error("[Trace] user_states insert error:", insErr);
+        if (isNetworkFailure(insErr)) {
+          startStateOffline({ formId, label, startedAt });
+          return;
+        }
         alert(insErr.message);
         return;
       }
@@ -165,6 +495,12 @@ export default function Trace() {
     }
 
     const endedAt = new Date().toISOString();
+
+    if (!connectionStatus) {
+      stopStateOffline({ label, existing, endedAt });
+      return;
+    }
+
     const { error: endErr } = await supabase
       .from("user_states")
       .update({
@@ -175,6 +511,10 @@ export default function Trace() {
 
     if (endErr) {
       console.error("[Trace] user_states update error:", endErr);
+      if (isNetworkFailure(endErr)) {
+        stopStateOffline({ label, existing, endedAt });
+        return;
+      }
       alert(endErr.message);
       return;
     }
@@ -235,6 +575,7 @@ export default function Trace() {
   }
 
   const activeStateEntries = Object.entries(activeStates);
+  const pendingCount = pendingActions.length;
 
   return (
     <div className="trace-shell">
@@ -260,6 +601,25 @@ export default function Trace() {
             <div className="trace-stat">
               <span className="trace-stat-value">{activeStateEntries.length}</span>
               <span className="trace-stat-label">Active states</span>
+            </div>
+            <div
+              className={`trace-connection-status ${
+                connectionStatus ? "trace-connection-online" : "trace-connection-offline"
+              }`}
+            >
+              <span className="trace-connection-dot" />
+              <div>
+                <strong>
+                  {connectionStatus ? "Connected to internet" : "Disconnected from internet"}
+                </strong>
+                <span>
+                  {connectionStatus
+                    ? pendingCount > 0
+                      ? `Syncing ${pendingCount} cached item${pendingCount === 1 ? "" : "s"}`
+                      : "Live updates are being saved to SQL now."
+                    : `Caching ${pendingCount} item${pendingCount === 1 ? "" : "s"} locally until connection returns.`}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -290,7 +650,10 @@ export default function Trace() {
                   <div key={labelId} className="trace-active-chip">
                     <div>
                       <strong>{activeLabel?.label_name || "Active state"}</strong>
-                      <span>Started {new Date(state.started_at).toLocaleTimeString()}</span>
+                      <span>
+                        Started {new Date(state.started_at).toLocaleTimeString()}
+                        {state.pendingSync ? " - waiting to sync" : ""}
+                      </span>
                     </div>
                   </div>
                 );
