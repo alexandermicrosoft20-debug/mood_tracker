@@ -1,22 +1,22 @@
 /**
- * BehaviorTrace — Minimal Service Worker
+ * BehaviorTrace — Service Worker
  * Written by Paul Gedrimas — 12/2025
  *
  * This service worker:
- * - Handles the install lifecycle event
- * - Intercepts fetch requests
- * - Uses a simple network-first strategy with cache fallback
+ * - Handles installation lifecycle events
+ * - Provides a simple network-first fetch strategy with cache fallback
+ * - Receives and displays push notifications
+ * - Handles notification click events to open relevant app URLs
  *
- * Purpose:
- * - Lightweight PWA support
- * - Basic offline resilience if a cached response exists
- * - Intended as a minimal baseline (can be extended later)
+ * Note:
+ * - This is a minimal service worker intended for PWA support
+ * - Caching strategy can be extended for offline-first behavior if needed
  */
 
 // -------------------------
 // INSTALL EVENT
 // -------------------------
-// Fired when the service worker is installed
+// Fired when the service worker is first installed
 self.addEventListener("install", (e) => {
   console.log("Service worker installed");
 });
@@ -25,9 +25,39 @@ self.addEventListener("install", (e) => {
 // FETCH EVENT
 // -------------------------
 // Intercepts network requests
-// Attempts network first, falls back to cache if offline
+// Uses a simple network-first strategy with cache fallback
 self.addEventListener("fetch", (e) => {
   e.respondWith(
     fetch(e.request).catch(() => caches.match(e.request))
+  );
+});
+
+// -------------------------
+// PUSH NOTIFICATIONS
+// -------------------------
+// Handles incoming push events from the server
+self.addEventListener("push", (event) => {
+  const data = event.data.json();
+
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      icon: "/icons/icon-192.png",
+      data: {
+        url: data.url, // URL to open when notification is clicked
+      },
+    })
+  );
+});
+
+// -------------------------
+// NOTIFICATION CLICK
+// -------------------------
+// Opens the relevant page when the user clicks a notification
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+
+  event.waitUntil(
+    clients.openWindow(event.notification.data.url)
   );
 });

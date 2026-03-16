@@ -45,6 +45,8 @@ create table public.labels (
   decay_seconds integer null,
   ema_interval_seconds integer null,
   ema_prompt text null,
+  ema_active_text text null,
+  ema_active_color text null,
   constraint labels_pkey primary key (id),
   constraint labels_form_id_fkey foreign KEY (form_id) references forms (id) on delete CASCADE,
   constraint labels_label_type_check check (

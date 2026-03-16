@@ -1,26 +1,47 @@
 <!DOCTYPE html>
+<!--
+  BehaviorTrace – Main HTML entry point
+  Written by Paul Gedrimas — 12/2025
+-->
 <html lang="en">
   <head>
-  
+    <!-- Character encoding -->
     <meta charset="UTF-8" />
+
+    <!-- Responsive layout for mobile and desktop -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	
-	<!-- Browser tab favicon -->
-	<link rel="icon" href="/favicon.ico" />
 
-	<!-- Android PWA uses manifest.json -->
-	<link rel="manifest" href="/manifest.json" />
-	
-	<!-- iOS home screen -->
-	<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-	<meta name="apple-mobile-web-app-capable" content="yes">
-	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <!-- Browser tab favicon -->
+    <link rel="icon" href="/favicon.ico" />
 
+    <!-- PWA manifest (used by Android and supported browsers) -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Theme color for browser UI and PWA status bars -->
+    <meta name="theme-color" content="#f8c537" />
+
+    <!-- iOS PWA configuration -->
+    <!-- Enables standalone (app-like) mode when added to home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+
+    <!-- Controls the iOS status bar appearance -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <!-- App name shown on iOS home screen -->
+    <meta name="apple-mobile-web-app-title" content="Trace" />
+
+    <!-- iOS home screen icon -->
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+    <!-- Page title (browser tab name) -->
     <title>Behaviour Trace</title>
-    <script type="module" crossorigin src="/assets/index-58brqgOv.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DBkz-poX.css">
+    <script type="module" crossorigin src="/assets/index-D3gu8Dsf.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index--sVvLVKy.css">
   </head>
   <body>
-    <div id="root"></div>
+    <!-- React mounts the application into this root div -->
+    <div id="root"></div>
+
+    <!-- Main React entry point (Vite module) -->
   </body>
 </html>
