@@ -187,6 +187,56 @@
   margin-bottom: 1.5rem;
 }
 
+.trace-search-panel {
+  margin-bottom: 1.5rem;
+}
+
+.trace-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 1rem;
+}
+
+.trace-search-input {
+  flex: 1 1 320px;
+  min-width: 0;
+  border: 1px solid rgba(23, 32, 42, 0.12);
+  border-radius: 18px;
+  padding: 0.95rem 1rem;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--trace-ink);
+  font-size: 1rem;
+  box-shadow: inset 0 1px 2px rgba(17, 24, 39, 0.04);
+}
+
+.trace-search-input:focus {
+  outline: none;
+  border-color: rgba(42, 157, 143, 0.5);
+  box-shadow: 0 0 0 4px rgba(42, 157, 143, 0.12);
+}
+
+.trace-search-input::placeholder {
+  color: rgba(95, 107, 118, 0.9);
+}
+
+.trace-search-clear {
+  border: 0;
+  border-radius: 16px;
+  padding: 0.85rem 1rem;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #3f8f86, #2a9d8f);
+  box-shadow: 0 12px 24px rgba(42, 157, 143, 0.22);
+}
+
+.trace-search-meta {
+  margin-top: 0.85rem;
+  color: var(--trace-muted);
+  font-size: 0.92rem;
+}
+
 .trace-kicker {
   text-transform: uppercase;
   letter-spacing: 0.12em;

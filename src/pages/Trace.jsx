@@ -83,6 +83,64 @@ function formatDuration(startedAt, endedAt) {
   return `${seconds}s`;
 }
 
+function normalizeSearchValue(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function levenshteinDistance(source, target) {
+  const rows = source.length + 1;
+  const cols = target.length + 1;
+  const matrix = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+  for (let row = 0; row < rows; row += 1) matrix[row][0] = row;
+  for (let col = 0; col < cols; col += 1) matrix[0][col] = col;
+
+  for (let row = 1; row < rows; row += 1) {
+    for (let col = 1; col < cols; col += 1) {
+      const cost = source[row - 1] === target[col - 1] ? 0 : 1;
+      matrix[row][col] = Math.min(
+        matrix[row - 1][col] + 1,
+        matrix[row][col - 1] + 1,
+        matrix[row - 1][col - 1] + cost
+      );
+    }
+  }
+
+  return matrix[rows - 1][cols - 1];
+}
+
+function isLooseTokenMatch(queryToken, candidateToken) {
+  if (!queryToken || !candidateToken) return false;
+  if (candidateToken.includes(queryToken) || queryToken.includes(candidateToken)) return true;
+
+  const maxDistance = queryToken.length >= 8 ? 2 : 1;
+  return levenshteinDistance(queryToken, candidateToken) <= maxDistance;
+}
+
+function matchesLabelSearch(query, form, label) {
+  const normalizedQuery = normalizeSearchValue(query);
+  if (!normalizedQuery) return true;
+
+  const candidateText = normalizeSearchValue(
+    `${label.label_name} ${label.label_type} ${form.title} ${form.description || ""}`
+  );
+
+  if (candidateText.includes(normalizedQuery)) return true;
+
+  const queryTokens = normalizedQuery.split(" ").filter(Boolean);
+  const candidateTokens = candidateText.split(" ").filter(Boolean);
+
+  return queryTokens.every((queryToken) =>
+    candidateTokens.some((candidateToken) => isLooseTokenMatch(queryToken, candidateToken))
+  );
+}
+
 export default function Trace() {
   const navigate = useNavigate();
 
@@ -93,6 +151,7 @@ export default function Trace() {
   const [connectionStatus, setConnectionStatus] = useState(() =>
     typeof navigator === "undefined" ? true : navigator.onLine
   );
+  const [searchQuery, setSearchQuery] = useState("");
   const [pendingActions, setPendingActions] = useState(() =>
     readJsonStorage(PENDING_ACTIONS_KEY, [])
   );
@@ -576,6 +635,13 @@ export default function Trace() {
 
   const activeStateEntries = Object.entries(activeStates);
   const pendingCount = pendingActions.length;
+  const filteredForms = forms
+    .map((form) => ({
+      ...form,
+      labels: form.labels.filter((label) => matchesLabelSearch(searchQuery, form, label)),
+    }))
+    .filter((form) => form.labels.length > 0 || !searchQuery.trim());
+  const totalVisibleLabels = filteredForms.reduce((count, form) => count + form.labels.length, 0);
 
   return (
     <div className="trace-shell">
@@ -662,11 +728,46 @@ export default function Trace() {
           )}
         </section>
 
+        <section className="trace-panel trace-search-panel">
+          <p className="trace-kicker">Find labels</p>
+          <h2 className="trace-section-title">Search states, urges, and effects</h2>
+          <p className="trace-section-copy">
+            Start typing and matching labels will appear automatically, even with small spelling
+            mistakes.
+          </p>
+
+          <div className="trace-search-row">
+            <input
+              className="trace-search-input"
+              type="text"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search for anxious, relaxed, weed craving, oxycodone..."
+              aria-label="Search study labels"
+            />
+            {searchQuery.trim() && (
+              <button className="trace-search-clear" onClick={() => setSearchQuery("")}>
+                Clear
+              </button>
+            )}
+          </div>
+
+          <div className="trace-search-meta">
+            {searchQuery.trim()
+              ? `${totalVisibleLabels} matching label${totalVisibleLabels === 1 ? "" : "s"}`
+              : "Showing all available labels"}
+          </div>
+        </section>
+
         {forms.length === 0 ? (
           <div className="trace-empty">No study forms are available right now.</div>
+        ) : filteredForms.length === 0 ? (
+          <div className="trace-empty">
+            No labels matched "{searchQuery}". Try a shorter phrase or a nearby spelling.
+          </div>
         ) : (
           <div className="trace-form-grid">
-            {forms.map((form) => (
+            {filteredForms.map((form) => (
               <section key={form.id} className="trace-form-card">
                 <p className="trace-kicker">Study form</p>
                 <h3>{form.title}</h3>
