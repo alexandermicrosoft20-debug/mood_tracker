@@ -1,64 +1,48 @@
 /**
- * BehaviorTrace — Admin Dashboard (Forms, Labels, Device Assignment)
- * Written by Paul Gedrimas — 12/2025
- *
- * This component:
- * - Requires an authenticated session (admin flow enforced elsewhere via routing/guards)
- * - Lets admins create "forms" that contain multiple labeling buttons
- * - Supports three label types:
- *   - event: instantaneous log entry (saved to user_logs)
- *   - decay: event with decay metadata (saved to labels.decay_seconds)
- *   - ema: state label that triggers periodic confirmation prompts (saved to labels.ema_interval_seconds + labels.ema_prompt)
- * - Allows admins to assign EmotiBit device IDs to users who do not yet have a device
- * - Allows admins to delete forms (and associated user_logs)
+ * BehaviorTrace - Admin Dashboard (Forms, Labels, Device Assignment)
+ * Written by Paul Gedrimas - 12/2025
  */
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
 import { useNavigate } from "react-router-dom";
+import "./DashBoard.css";
+import dashboardLogo from "../../assets/images/logo.png";
+
+const EMA_COLOR_OPTIONS = [
+  { value: "danger", label: "Signal Red" },
+  { value: "warning", label: "Amber" },
+  { value: "success", label: "Green" },
+  { value: "primary", label: "Blue" },
+  { value: "dark", label: "Midnight" },
+];
 
 export default function Dashboard() {
   const navigate = useNavigate();
 
-  // -------------------------
-  // STATE (session + data)
-  // -------------------------
   const [userId, setUserId] = useState(null);
-
-  // Existing forms (pulled from DB)
   const [forms, setForms] = useState([]);
 
-  // Form creation fields
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
-  // Label creation fields (labels are staged locally until "Create Form")
   const [newLabelName, setNewLabelName] = useState("");
   const [labelType, setLabelType] = useState("event");
   const [decaySeconds, setDecaySeconds] = useState("");
-  const [emaInterval, setEmaInterval] = useState("");
-  const [emaPrompt, setEmaPrompt] = useState("");
+  const [emaActiveText, setEmaActiveText] = useState("");
+  const [emaActiveColor, setEmaActiveColor] = useState("danger");
 
-  // Staged labels to be inserted with the new form
   const [labels, setLabels] = useState([]);
 
-  // Form deletion confirmation state
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [confirmText, setConfirmText] = useState("");
 
-  // -------------------------
-  // STATE (device assignment)
-  // -------------------------
   const [usersWithoutDevices, setUsersWithoutDevices] = useState([]);
   const [deviceId, setDeviceId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState(null);
 
-  // -------------------------
-  // INIT (auth check + initial fetch)
-  // -------------------------
   useEffect(() => {
     const init = async () => {
-      // Require a valid session; otherwise redirect to login
       const {
         data: { session },
       } = await supabase.auth.getSession();
@@ -69,21 +53,14 @@ export default function Dashboard() {
       }
 
       setUserId(session.user.id);
-
-      // Load existing forms and users awaiting device assignment
       await fetchForms();
       await fetchUsersWithoutDevices();
     };
 
     init();
-    // Note: navigate not included intentionally to avoid reruns
-  }, []);
+  }, [navigate]);
 
-  // -------------------------
-  // DATA FETCHING
-  // -------------------------
   async function fetchForms() {
-    // Fetch all forms (most recent first)
     const { data } = await supabase
       .from("forms")
       .select("*")
@@ -93,8 +70,6 @@ export default function Dashboard() {
   }
 
   async function fetchUsersWithoutDevices() {
-    // This assumes a table/view "users_without_devices" exists containing id + email
-    // Used to show admins who still need an EmotiBit device assigned
     const { data, error } = await supabase
       .from("users_without_devices")
       .select("id, email");
@@ -107,65 +82,60 @@ export default function Dashboard() {
     setUsersWithoutDevices(data || []);
   }
 
-  // -------------------------
-  // LABEL STAGING (local list before DB insert)
-  // -------------------------
+  function resetLabelFields() {
+    setNewLabelName("");
+    setLabelType("event");
+    setDecaySeconds("");
+    setEmaActiveText("");
+    setEmaActiveColor("danger");
+  }
+
   function addLabel() {
-    // Require a non-empty label name
     if (!newLabelName.trim()) return;
 
-    // Validate decay label configuration
     if (labelType === "decay" && !decaySeconds) {
       alert("Decay labels require decay time");
       return;
     }
 
-    // Validate EMA label configuration
-    if (labelType === "ema") {
-      if (!emaInterval) {
-        alert("EMA labels require prompt interval");
-        return;
-      }
-      if (!emaPrompt.trim()) {
-        alert("EMA labels require a prompt (what the user will be asked).");
-        return;
-      }
+    if (labelType === "ema" && !emaActiveText.trim()) {
+      alert("State labels require active button text.");
+      return;
     }
 
-    // Append new staged label object
-    setLabels([
-      ...labels,
+    setLabels((current) => [
+      ...current,
       {
         label_name: newLabelName.trim(),
         label_type: labelType,
         decay_seconds: labelType === "decay" ? Number(decaySeconds) : null,
-        ema_interval_seconds: labelType === "ema" ? Number(emaInterval) : null,
-        ema_prompt: labelType === "ema" ? emaPrompt.trim() : null,
+        ema_interval_seconds: null,
+        ema_prompt: null,
+        ema_active_text: labelType === "ema" ? emaActiveText.trim() : null,
+        ema_active_color: labelType === "ema" ? emaActiveColor : null,
       },
     ]);
 
-    // Reset label inputs back to defaults
-    setNewLabelName("");
-    setLabelType("event");
-    setDecaySeconds("");
-    setEmaInterval("");
-    setEmaPrompt("");
+    resetLabelFields();
   }
 
-  // -------------------------
-  // FORM CREATION (forms + labels)
-  // -------------------------
+  function removeLabel(indexToRemove) {
+    setLabels((current) => current.filter((_, index) => index !== indexToRemove));
+  }
+
   async function createForm() {
-    // Require at least a title and at least one label
-    if (!title || labels.length === 0) {
-      alert("Form title and labels required");
+    if (!title.trim() || labels.length === 0) {
+      alert("Form title and at least one label are required.");
       return;
     }
 
-    // Insert form first to get form.id
     const { data: form, error } = await supabase
       .from("forms")
-      .insert({ title, description, created_by: userId })
+      .insert({
+        title: title.trim(),
+        description: description.trim(),
+        created_by: userId,
+      })
       .select()
       .single();
 
@@ -174,60 +144,53 @@ export default function Dashboard() {
       return;
     }
 
-    // Insert associated labels referencing the new form.id
-    await supabase.from("labels").insert(
-      labels.map((l) => ({
+    const { error: labelsError } = await supabase.from("labels").insert(
+      labels.map((label) => ({
         form_id: form.id,
-        label_name: l.label_name,
-        label_type: l.label_type,
-        decay_seconds: l.decay_seconds,
-        ema_interval_seconds: l.ema_interval_seconds,
-        ema_prompt: l.ema_prompt,
+        label_name: label.label_name,
+        label_type: label.label_type,
+        decay_seconds: label.decay_seconds,
+        ema_interval_seconds: label.ema_interval_seconds,
+        ema_prompt: label.ema_prompt,
+        ema_active_text: label.ema_active_text,
+        ema_active_color: label.ema_active_color,
       }))
     );
 
-    // Reset UI and refresh form list
+    if (labelsError) {
+      alert(labelsError.message);
+      return;
+    }
+
     setTitle("");
     setDescription("");
     setLabels([]);
+    resetLabelFields();
     fetchForms();
   }
 
-  // -------------------------
-  // FORM DELETION (guarded by title confirmation)
-  // -------------------------
   async function confirmDeleteForm() {
     if (!deleteTarget) return;
 
-    // Require typing the exact form title to confirm deletion
     if (confirmText !== deleteTarget.title) {
       alert("Form title does not match");
       return;
     }
 
-    // Delete user logs for that form (optional: avoids orphaned logs)
     await supabase.from("user_logs").delete().eq("form_id", deleteTarget.id);
-
-    // Delete the form (labels may cascade if FK is configured with ON DELETE CASCADE)
     await supabase.from("forms").delete().eq("id", deleteTarget.id);
 
-    // Reset deletion UI state and refresh forms
     setDeleteTarget(null);
     setConfirmText("");
     fetchForms();
   }
 
-  // -------------------------
-  // DEVICE ASSIGNMENT
-  // -------------------------
   async function assignDevice() {
-    // Require user selection and device id input
     if (!selectedUserId || !deviceId.trim()) {
       alert("Select a user and enter a device ID");
       return;
     }
 
-    // Insert mapping into emotibit_devices
     const { error } = await supabase.from("emotibit_devices").insert({
       user_id: selectedUserId,
       device_id: deviceId.trim(),
@@ -238,209 +201,365 @@ export default function Dashboard() {
       return;
     }
 
-    // Remove from users_without_devices if that table is meant to track pending assignments
     await supabase.from("users_without_devices").delete().eq("id", selectedUserId);
 
-    // Reset UI and refresh users list
     setDeviceId("");
     setSelectedUserId(null);
     fetchUsersWithoutDevices();
   }
 
-  // -------------------------
-  // AUTH
-  // -------------------------
   async function logout() {
     await supabase.auth.signOut();
     navigate("/");
   }
 
-  // -------------------------
-  // RENDER
-  // -------------------------
+  function labelTypeCopy(type) {
+    if (type === "event") return "Instant";
+    if (type === "decay") return "Decay";
+    return "State";
+  }
+
+  function labelChipClass(label) {
+    if (label.label_type === "decay") return "dashboard-chip dashboard-chip-warning";
+    if (label.label_type === "ema") return "dashboard-chip dashboard-chip-state";
+    return "dashboard-chip dashboard-chip-primary";
+  }
+
+  function selectedColorLabel() {
+    return EMA_COLOR_OPTIONS.find((option) => option.value === emaActiveColor)?.label || "Custom";
+  }
+
   return (
-    <div className="container mt-5">
-      <div className="d-flex justify-content-between mb-4">
-        <h1>Admin Dashboard</h1>
-        <button className="btn btn-outline-danger" onClick={logout}>
-          Logout
-        </button>
-      </div>
+    <div className="dashboard-shell">
+      <div className="dashboard-backdrop dashboard-backdrop-one" />
+      <div className="dashboard-backdrop dashboard-backdrop-two" />
 
-      <hr />
+      <div className="container py-4 py-md-5 position-relative">
+        <section className="dashboard-hero">
+          <div>
+            <img
+              className="dashboard-inline-logo"
+              src={dashboardLogo}
+              alt="BehaviorTrace logo"
+            />
+            <p className="dashboard-subtitle">
+              Create forms, tune label behavior, and assign devices from one place.
+            </p>
+          </div>
 
-      {/* ------------------------- */}
-      {/* DEVICE ASSIGNMENT */}
-      {/* ------------------------- */}
-      <h3>Assign Devices</h3>
-
-      <select
-        className="form-control mb-2"
-        value={selectedUserId || ""}
-        onChange={(e) => setSelectedUserId(e.target.value)}
-      >
-        <option value="">Select User</option>
-        {usersWithoutDevices.map((u) => (
-          <option key={u.id} value={u.id}>
-            {u.email || u.id}
-          </option>
-        ))}
-      </select>
-
-      <input
-        className="form-control mb-2"
-        placeholder="Device ID"
-        value={deviceId}
-        onChange={(e) => setDeviceId(e.target.value)}
-      />
-
-      <button className="btn btn-primary" onClick={assignDevice}>
-        Assign Device
-      </button>
-
-      <hr />
-
-      {/* ------------------------- */}
-      {/* FORM CREATION */}
-      {/* ------------------------- */}
-      <h3>Create Form</h3>
-
-      <input
-        className="form-control mb-2"
-        placeholder="Form title"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-      />
-
-      <textarea
-        className="form-control mb-3"
-        placeholder="Form description"
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-      />
-
-      {/* ------------------------- */}
-      {/* LABEL CREATION */}
-      {/* ------------------------- */}
-      <h5>Add Label</h5>
-
-      <input
-        className="form-control mb-2"
-        placeholder="Label name"
-        value={newLabelName}
-        onChange={(e) => setNewLabelName(e.target.value)}
-      />
-
-      <select
-        className="form-control mb-2"
-        value={labelType}
-        onChange={(e) => setLabelType(e.target.value)}
-      >
-        {/* UI naming: event labels are "Instant" */}
-        <option value="event">Instant</option>
-        <option value="decay">Decay</option>
-        <option value="ema">State (EMA)</option>
-      </select>
-
-      {/* Decay configuration */}
-      {labelType === "decay" && (
-        <input
-          type="number"
-          className="form-control mb-2"
-          placeholder="Decay seconds"
-          value={decaySeconds}
-          onChange={(e) => setDecaySeconds(e.target.value)}
-        />
-      )}
-
-      {/* EMA configuration */}
-      {labelType === "ema" && (
-        <>
-          <input
-            type="number"
-            className="form-control mb-2"
-            placeholder="Prompt interval (seconds)"
-            value={emaInterval}
-            onChange={(e) => setEmaInterval(e.target.value)}
-          />
-          <input
-            className="form-control mb-2"
-            placeholder='State prompt (e.g. "Are you still running?")'
-            value={emaPrompt}
-            onChange={(e) => setEmaPrompt(e.target.value)}
-          />
-        </>
-      )}
-
-      <button className="btn btn-secondary mb-3" onClick={addLabel}>
-        Add Label
-      </button>
-
-      {/* Preview staged labels before creating the form */}
-      <ul>
-        {labels.map((l, i) => (
-          <li key={i}>
-            {l.label_name} — {l.label_type}
-            {l.label_type === "ema"
-              ? ` (every ${l.ema_interval_seconds}s: "${l.ema_prompt}")`
-              : ""}
-          </li>
-        ))}
-      </ul>
-
-      <button className="btn btn-primary" onClick={createForm}>
-        Create Form
-      </button>
-
-      <hr />
-
-      {/* ------------------------- */}
-      {/* EXISTING FORMS + DELETE */}
-      {/* ------------------------- */}
-      <h3>Existing Forms</h3>
-
-      <ul className="list-group">
-        {forms.map((f) => (
-          <li
-            key={f.id}
-            className="list-group-item d-flex justify-content-between"
-          >
-            {f.title}
-            <button
-              className="btn btn-sm btn-outline-danger"
-              onClick={() => {
-                setDeleteTarget(f);
-                setConfirmText("");
-              }}
-            >
-              Delete
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      {/* Delete confirmation panel */}
-      {deleteTarget && (
-        <div className="mt-4 border p-3">
-          <p>
-            Type <strong>{deleteTarget.title}</strong> to confirm deletion
-          </p>
-          <input
-            className="form-control mb-2"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-          />
-          <button className="btn btn-danger" onClick={confirmDeleteForm}>
-            Delete
+          <div className="dashboard-hero-actions">
+            <div className="dashboard-stat">
+              <span className="dashboard-stat-value">{forms.length}</span>
+              <span className="dashboard-stat-label">Forms</span>
+            </div>
+            <div className="dashboard-stat">
+              <span className="dashboard-stat-value">{usersWithoutDevices.length}</span>
+              <span className="dashboard-stat-label">Waiting for devices</span>
+            </div>
+          </div>
+          <button className="btn dashboard-logout-btn" onClick={logout}>
+            Logout
           </button>
-          <button
-            className="btn btn-secondary ms-2"
-            onClick={() => setDeleteTarget(null)}
-          >
-            Cancel
-          </button>
+        </section>
+
+        <div className="dashboard-grid">
+          <section className="dashboard-panel">
+            <div className="dashboard-panel-header">
+              <div>
+                <p className="dashboard-panel-kicker">Device queue</p>
+                <h2>Assign EmotiBit devices</h2>
+              </div>
+              <span className="dashboard-pill">{usersWithoutDevices.length} pending</span>
+            </div>
+
+            <div className="dashboard-stack">
+              <label className="dashboard-label">Participant</label>
+              <select
+                className="dashboard-input"
+                value={selectedUserId || ""}
+                onChange={(e) => setSelectedUserId(e.target.value)}
+              >
+                <option value="">Select participant</option>
+                {usersWithoutDevices.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.email || user.id}
+                  </option>
+                ))}
+              </select>
+
+              <label className="dashboard-label">Device ID</label>
+              <input
+                className="dashboard-input"
+                placeholder="Enter device ID"
+                value={deviceId}
+                onChange={(e) => setDeviceId(e.target.value)}
+              />
+
+              <button className="dashboard-action-btn" onClick={assignDevice}>
+                Assign device
+              </button>
+            </div>
+          </section>
+
+          <section className="dashboard-panel dashboard-panel-form">
+            <div className="dashboard-panel-header">
+              <div>
+                <p className="dashboard-panel-kicker">Form builder</p>
+                <h2>Create a new study form</h2>
+              </div>
+              <span className="dashboard-pill dashboard-pill-accent">
+                {labels.length} staged label{labels.length === 1 ? "" : "s"}
+              </span>
+            </div>
+
+            <div className="dashboard-stack">
+              <div className="dashboard-field-grid">
+                <div>
+                  <label className="dashboard-label">Form title</label>
+                  <input
+                    className="dashboard-input"
+                    placeholder="e.g. Classroom behavior"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="dashboard-label">Description</label>
+                  <textarea
+                    className="dashboard-input dashboard-textarea"
+                    placeholder="Short description for the participant"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="dashboard-creator-card">
+                <div className="dashboard-creator-header">
+                  <div>
+                    <p className="dashboard-panel-kicker">Label composer</p>
+                    <h3>Design one label at a time</h3>
+                  </div>
+                  <div className="dashboard-type-toggle" role="tablist" aria-label="Label type">
+                    <button
+                      type="button"
+                      className={labelType === "event" ? "is-active" : ""}
+                      onClick={() => setLabelType("event")}
+                    >
+                      Instant
+                    </button>
+                    <button
+                      type="button"
+                      className={labelType === "decay" ? "is-active" : ""}
+                      onClick={() => setLabelType("decay")}
+                    >
+                      Decay
+                    </button>
+                    <button
+                      type="button"
+                      className={labelType === "ema" ? "is-active" : ""}
+                      onClick={() => setLabelType("ema")}
+                    >
+                      State
+                    </button>
+                  </div>
+                </div>
+
+                <div className="dashboard-field-grid">
+                  <div>
+                    <label className="dashboard-label">Label name</label>
+                    <input
+                      className="dashboard-input"
+                      placeholder="e.g. Feeling angry"
+                      value={newLabelName}
+                      onChange={(e) => setNewLabelName(e.target.value)}
+                    />
+                  </div>
+
+                  {labelType === "decay" && (
+                    <div>
+                      <label className="dashboard-label">Decay duration</label>
+                      <input
+                        type="number"
+                        className="dashboard-input"
+                        placeholder="Seconds"
+                        value={decaySeconds}
+                        onChange={(e) => setDecaySeconds(e.target.value)}
+                      />
+                    </div>
+                  )}
+
+                  {labelType === "ema" && (
+                    <>
+                      <div>
+                        <label className="dashboard-label">Active button text</label>
+                        <input
+                          className="dashboard-input"
+                          placeholder='e.g. "Stop - feeling angry"'
+                          value={emaActiveText}
+                          onChange={(e) => setEmaActiveText(e.target.value)}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="dashboard-label">Active color</label>
+                        <select
+                          className="dashboard-input"
+                          value={emaActiveColor}
+                          onChange={(e) => setEmaActiveColor(e.target.value)}
+                        >
+                          {EMA_COLOR_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="dashboard-preview-row">
+                  <div className="dashboard-preview-card">
+                    <span className="dashboard-preview-label">Preview:</span>
+                    <div className={labelChipClass({ label_type: labelType })}>
+                      {newLabelName || "New label"}
+                    </div>
+                    {labelType === "ema" && (
+                      <div className={`dashboard-active-preview dashboard-active-${emaActiveColor}`}>
+                        {emaActiveText || "Stop state"}
+                      </div>
+                    )}
+                    {labelType === "decay" && decaySeconds && (
+                      <p className="dashboard-preview-copy">Auto-decay after {decaySeconds}s</p>
+                    )}
+                    {labelType === "ema" && (
+                      <p className="dashboard-preview-copy">Active color: {selectedColorLabel()}</p>
+                    )}
+                  </div>
+
+                  <button className="dashboard-secondary-btn" onClick={addLabel}>
+                    Add label to form
+                  </button>
+                </div>
+              </div>
+
+              <div className="dashboard-staged-area">
+                <div className="dashboard-staged-header">
+                  <h3>Staged labels</h3>
+                  <span>{labels.length} ready</span>
+                </div>
+
+                {labels.length === 0 ? (
+                  <div className="dashboard-empty-state">
+                    Your labels will appear here as you build the form.
+                  </div>
+                ) : (
+                  <div className="dashboard-label-list">
+                    {labels.map((label, index) => (
+                      <div key={`${label.label_name}-${index}`} className="dashboard-label-card">
+                        <div>
+                          <div className={labelChipClass(label)}>
+                            {label.label_name}
+                          </div>
+                          <p className="dashboard-label-meta">
+                            {labelTypeCopy(label.label_type)}
+                            {label.label_type === "decay" && label.decay_seconds
+                              ? ` · ${label.decay_seconds}s`
+                              : ""}
+                            {label.label_type === "ema" && label.ema_active_text
+                              ? ` · ${label.ema_active_text}`
+                              : ""}
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="dashboard-remove-btn"
+                          onClick={() => removeLabel(index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button className="dashboard-action-btn dashboard-create-btn" onClick={createForm}>
+                Publish form
+              </button>
+            </div>
+          </section>
         </div>
-      )}
+
+        <section className="dashboard-panel dashboard-existing-panel">
+          <div className="dashboard-panel-header">
+            <div>
+              <p className="dashboard-panel-kicker">Library</p>
+              <h2>Existing forms</h2>
+            </div>
+            <span className="dashboard-pill">{forms.length} total</span>
+          </div>
+
+          {forms.length === 0 ? (
+            <div className="dashboard-empty-state">No forms yet. Create your first one above.</div>
+          ) : (
+            <div className="dashboard-form-grid">
+              {forms.map((form) => (
+                <article key={form.id} className="dashboard-form-card">
+                  <div>
+                    <h3>{form.title}</h3>
+                    <p>{form.description || "No description provided yet."}</p>
+                  </div>
+
+                  <button
+                    className="dashboard-danger-btn"
+                    onClick={() => {
+                      setDeleteTarget(form);
+                      setConfirmText("");
+                    }}
+                  >
+                    Delete form
+                  </button>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {deleteTarget && (
+          <div className="dashboard-modal-backdrop">
+            <div className="dashboard-modal-card">
+              <p className="dashboard-panel-kicker">Delete form</p>
+              <h3>Type the form title to confirm</h3>
+              <p className="dashboard-modal-copy">
+                This will permanently remove <strong>{deleteTarget.title}</strong> and related data.
+              </p>
+
+              <input
+                className="dashboard-input"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="Enter exact form title"
+              />
+
+              <div className="dashboard-modal-actions">
+                <button className="dashboard-danger-btn" onClick={confirmDeleteForm}>
+                  Delete permanently
+                </button>
+                <button
+                  className="dashboard-secondary-btn"
+                  onClick={() => setDeleteTarget(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
